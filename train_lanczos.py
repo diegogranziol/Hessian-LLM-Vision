@@ -117,7 +117,7 @@ class CurvVecProduct(object):
         )
         time_diff = time.time() - start_time
         self.iters += 1
-        print('Iter %d. Time: %.2f' % (self.iters, time_diff))
+        # print('Iter %d. Time: %.2f' % (self.iters, time_diff))
         # return output.cpu().unsqueeze(1)
         return output.unsqueeze(1)
 
@@ -229,11 +229,10 @@ for epoch in range(args.epochs):  # Loop over the dataset multiple times if need
 
         # Compute gradients manually
         gradients = torch.autograd.grad(loss, model.parameters(), create_graph=True)
-        gradients.cuda()
 
         P = sum(p.numel() for p in model.parameters())
         grad_vector = torch.cat([grad.view(-1) for grad in gradients])
-        grad_vector.cuda()
+        # grad_vector.cuda()
         # grad_vector = grad_vector.cuda()
         adjusted_grad_vector = grad_vector.clone()  # Initialize adjusted gradient vector
 
@@ -243,7 +242,7 @@ for epoch in range(args.epochs):  # Loop over the dataset multiple times if need
         productor = CurvVecProduct(a_train, model, criterion, init_vec=grad_vector)
 
         # Run the Lanczos algorithm
-        lanczos_iters = 15
+        lanczos_iters = 10
         Q, T = gpytorch.utils.lanczos.lanczos_tridiag(
             productor,
             max_iter=lanczos_iters,
@@ -260,13 +259,22 @@ for epoch in range(args.epochs):  # Loop over the dataset multiple times if need
 
         # Compute adjustments based on eigenvalues and eigenvectors
         for i, eigval in enumerate(eigvals):
-            vi = V[:, i]  # i-th eigenvector
-            dot_product = torch.dot(grad_vector, vi)
-            adjustment = (1/eigval - 1/(eigval+delta)) * dot_product * vi
+            dot_product = torch.dot(grad_vector, V[i])
+            adjustment = (1/eigval - 1/(eigval+delta)) * dot_product * V[i]
             adjusted_grad_vector += adjustment
-
         # Convert the split tensors to the correct shape
-        adjusted_gradients = [g.view(p.size()) for g, p in zip(adjusted_gradients, model.parameters())]
+        # adjusted_gradients = [g.view(p.size()) for g, p in zip(adjusted_grad_vector, model.parameters())]
+
+        # Calculate the correct splits for 'adjusted_grad_vector' based on model parameters
+        split_sizes = [p.numel() for p in model.parameters()]
+        # Split 'adjusted_grad_vector' accordingly
+        split_gradients = torch.split(adjusted_grad_vector, split_sizes)
+
+        # Now, correctly reshape each split gradient to match the corresponding parameter's shape
+        adjusted_gradients = [g.view(p.size()) for g, p in zip(split_gradients, model.parameters())]
+
+        # print('adjust gradient vector {}'.format(adjusted_grad_vector.shape))
+        # print('gradient {}'.format(grad_vector.shape))
 
         # Perform the manual SGD update with momentum, using adjusted gradients
         with torch.no_grad():
