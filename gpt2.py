@@ -1,57 +1,74 @@
-import torch
-from torch.optim import SGD
+from datasets import load_dataset
+from transformers import AutoTokenizer, DataCollatorForLanguageModeling
 from torch.utils.data import DataLoader
 from transformers import GPT2Tokenizer, GPT2LMHeadModel, GPT2Config
-from datasets import load_dataset
-dataset = load_dataset("wikimedia/wikipedia", "20231101.en")
-print('subssampling')
-subsample_size = int(0.001 * len(dataset['train']))
+from torch.optim import SGD
+import torch
+from torch.utils.tensorboard import SummaryWriter
+
+# Create a SummaryWriter instance (logs will be saved to "./runs" by default)
+writer = SummaryWriter()
+
+
+#device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+# Load the dataset
+ds = load_dataset("wikipedia", "20220301.simple")
+model_name = 'gpt2'
+# Calculate the size of the subsample (1% of the 'train' split)
+subsample_size = int(0.1 * len(ds['train']))
 
 # Create a random subsample of the dataset
-dataset = dataset['train'].shuffle(seed=42).select(range(subsample_size))
+subsample = ds['train'].shuffle(seed=42).select(range(subsample_size))
 
-from transformers import DataCollatorForLanguageModeling
-
-# Load the dataset
-# dataset = load_dataset("wikitext", "wikitext-103-v1", split='train')
-
-tokenizer = GPT2Tokenizer.from_pretrained("gpt2")
-tokenizer.pad_token = tokenizer.eos_token
-
-
-# Tokenize the dataset
+# Load tokenizer for your model
+tokenizer = AutoTokenizer.from_pretrained(model_name)
+if tokenizer.pad_token is None:
+    tokenizer.pad_token = tokenizer.eos_token
+# Tokenize the subsample
 def tokenize_function(examples):
-    # Removed padding=True, truncation=True from here
-    return tokenizer(examples["text"], truncation=True, max_length=512)
+    # Truncation and padding are typically handled here if necessary
+    return tokenizer(examples['text'], truncation=True, padding='max_length', max_length=512)
 
-tokenized_datasets = dataset.map(tokenize_function, batched=True, num_proc=4, remove_columns=["text"])
-data_collator = DataCollatorForLanguageModeling(tokenizer=tokenizer, return_tensors="pt", mlm=False)
+tokenized_docs = subsample.map(tokenize_function, batched=True)
 
-# DataLoader
-train_dataloader = DataLoader(tokenized_datasets, shuffle=True, batch_size=4, collate_fn=data_collator)
+from torch.utils.data import DataLoader
 
-# Initialize the model
+def select_model_inputs(batch):
+    return {
+        "input_ids": batch["input_ids"],
+        "attention_mask": batch["attention_mask"]
+    }
+
+# Apply the function to filter out only the necessary fields
+model_inputs = tokenized_docs.map(select_model_inputs, batched=True)
+
+# Manually collate a batch
+def manual_collate_fn(batch):
+    input_ids = [item['input_ids'] for item in batch]
+    attention_mask = [item['attention_mask'] for item in batch]
+    return {
+        'input_ids': torch.tensor(input_ids, dtype=torch.long),
+        'attention_mask': torch.tensor(attention_mask, dtype=torch.long)
+    }
+
+dataloader = DataLoader(model_inputs, batch_size=16, collate_fn=manual_collate_fn)
+
 config = GPT2Config(vocab_size=len(tokenizer), n_positions=512)
 model = GPT2LMHeadModel(config)
 model.to(torch.device("cuda"))
-
-# Initialize the optimizer
 optimizer = SGD(model.parameters(), lr=0.001)
 
-# Training loop
 num_epochs = 1
 model.train()
 
 for epoch in range(num_epochs):
-    for batch in train_dataloader:
+    for batch in dataloader:
+        input_ids = batch["input_ids"].to("cuda")
         optimizer.zero_grad()
-        inputs = {k: v.to(torch.device("cuda")) for k, v in batch.items()}
-        outputs = model(**inputs)
+        outputs = model(input_ids=input_ids, labels=input_ids)
         loss = outputs.loss
         loss.backward()
         optimizer.step()
+        writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
 
         print(f"Loss: {loss.item()}")
-
-# Note: This is a simplified example. For actual training, you'd also want to include validation,
-# handle device placement more robustly, and possibly use a more sophisticated optimizer like Adam.
