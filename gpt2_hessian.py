@@ -56,7 +56,7 @@ def _bn_train_mode(m):
     if isinstance(m, torch.nn.BatchNorm2d):
         m.train()
 
-def hess_vec(vector, loader, model, cuda=True, bn_train_mode=False):
+def hess_vec(vector, input_ids, model, cuda=True, bn_train_mode=False):
     param_list = list(model.parameters())
     vector_list = []
 
@@ -70,22 +70,22 @@ def hess_vec(vector, loader, model, cuda=True, bn_train_mode=False):
         model.apply(_bn_train_mode)
 
     model.zero_grad()
-    N = len(loader.dataset)
-    for batch_idx, batch in enumerate(loader):
-        if cuda:
-            input_ids = batch["input_ids"].to("cuda")
+    # N = len(loader.dataset)
+    # for batch_idx, batch in enumerate(loader):
+    #     if cuda:
+    #         input_ids = batch["input_ids"].to("cuda")
         #output = model(input)
-        outputs = model(input_ids=input_ids, labels=input_ids)
-        loss = outputs.loss
-        #loss = criterion(output, target)
-        loss *= len(input_ids)/N
-        # loss *= input.size()[0] / N
+    outputs = model(input_ids=input_ids, labels=input_ids)
+    loss = outputs.loss
+    #loss = criterion(output, target)
+    loss *= len(input_ids)
+    # loss *= input.size()[0] / N
 
-        grad_list = torch.autograd.grad(loss, param_list, create_graph=True)
-        dL_dvec = torch.zeros(1, device='cuda' if cuda else 'cpu')
-        for v, g in zip(vector_list, grad_list):
-            dL_dvec += torch.sum(v * g)
-        dL_dvec.backward()
+    grad_list = torch.autograd.grad(loss, param_list, create_graph=True)
+    dL_dvec = torch.zeros(1, device='cuda' if cuda else 'cpu')
+    for v, g in zip(vector_list, grad_list):
+        dL_dvec += torch.sum(v * g)
+    dL_dvec.backward()
 
     model.eval()
     return torch.cat([param.grad.view(-1) for param in param_list]).view(-1)
@@ -93,8 +93,8 @@ def hess_vec(vector, loader, model, cuda=True, bn_train_mode=False):
 
 
 class CurvVecProduct(object):
-    def __init__(self, loader, model, init_vec=None):
-        self.loader = loader
+    def __init__(self, input_ids, model, init_vec=None):
+        self.input_ids = input_ids
         self.model = model
         # self.criterion = criterion
         self.init_vec = init_vec
@@ -107,7 +107,7 @@ class CurvVecProduct(object):
         start_time = time.time()
         output = hess_vec(
             vector,
-            self.loader,
+            self.input_ids,
             self.model,
             # self.criterion,
             cuda=True,
@@ -115,7 +115,7 @@ class CurvVecProduct(object):
         )
         time_diff = time.time() - start_time
         self.iters += 1
-        # print('Iter %d. Time: %.2f' % (self.iters, time_diff))
+        print('Iter %d. Time: %.2f' % (self.iters, time_diff))
         # return output.cpu().unsqueeze(1)
         return output.unsqueeze(1)
 
@@ -158,7 +158,7 @@ for epoch in range(num_epochs):
         grad_vector = grad_vector / torch.norm(grad_vector)
 
         # Pass the random vector as the initial vector to the CurvVecProduct
-        productor = CurvVecProduct(dataloader, model, init_vec=grad_vector)
+        productor = CurvVecProduct(input_ids, model, init_vec=grad_vector)
 
         # Run the Lanczos algorithm
         lanczos_iters = 10
@@ -173,7 +173,8 @@ for epoch in range(num_epochs):
         eigvals, eigvects = torch.linalg.eigh(T)
         gammas = eigvects[0, :] ** 2
         V = eigvects.t() @ Q.t()
-        delta = args.lanczos_beta
+        #delta = args.lanczos_beta
+        delta = 1
 
         # Compute adjustments based on eigenvalues and eigenvectors
         for i, eigval in enumerate(eigvals):
@@ -212,7 +213,9 @@ for epoch in range(num_epochs):
 
         # Log the loss
         writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
-
+        del V
+        del gradients
+        print(torch.cuda.memory_summary())
         print(f"Loss: {loss.item()}")
 
 # Close the TensorBoard writer
