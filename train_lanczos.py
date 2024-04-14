@@ -123,6 +123,7 @@ class CurvVecProduct(object):
         self.iters += 1
         # print('Iter %d. Time: %.2f' % (self.iters, time_diff))
         # return output.cpu().unsqueeze(1)
+        torch.cuda.empty_cache()  # Clear cache after each product calculation
         return output.unsqueeze(1)
 
 
@@ -218,12 +219,18 @@ momentum_buffers = {}
 for param in model.parameters():
     momentum_buffers[param] = torch.zeros_like(param.data)
 
+    
+device = torch.device("cuda:0")  # Adjust if using a different device
+torch.cuda.set_device(device)
+
 # Train the network for 10 epochs using the zerofour_loader_train
 for epoch in range(args.epochs):  # Loop over the dataset multiple times if needed
     running_loss = 0.0
     correct = 0
     total = 0
+    
     for i, data in enumerate(a_train):
+        print("iter", i)
         inputs, labels = data
         inputs, labels = inputs.to('cuda'), labels.to('cuda')  # Move inputs and labels to GPU
 
@@ -244,9 +251,18 @@ for epoch in range(args.epochs):  # Loop over the dataset multiple times if need
 
         # Pass the random vector as the initial vector to the CurvVecProduct
         productor = CurvVecProduct(inputs, labels, model, criterion, init_vec=grad_vector)
+        total_memory = torch.cuda.get_device_properties(device).total_memory
 
+        # Get memory allocated and cached
+        allocated_memory = torch.cuda.memory_allocated(device)
+        cached_memory = torch.cuda.memory_reserved(device)
+        free_memory = total_memory - allocated_memory - (cached_memory - allocated_memory)
+#         print(f"Total GPU Memory: {total_memory / (1024 ** 3):.2f} GB")
+#         print(f"Allocated Memory: {allocated_memory / (1024 ** 3):.2f} GB")
+#         print(f"Cached (reserved) Memory: {cached_memory / (1024 ** 3):.2f} GB")
+        print(f"Free Memory: {free_memory / (1024 ** 3):.2f} GB")
         # Run the Lanczos algorithm
-        lanczos_iters = 10
+        lanczos_iters = 2
         Q, T = gpytorch.utils.lanczos.lanczos_tridiag(
             productor,
             max_iter=lanczos_iters,
@@ -298,7 +314,7 @@ for epoch in range(args.epochs):  # Loop over the dataset multiple times if need
 
         # Update the learning rate
         lr = linear_decay(epoch * len(a_train) + i) * args.lr
-        print(torch.cuda.memory_summary())
+#         print(torch.cuda.memory_summary())
 
         # Calculate accuracy
         _, predicted = torch.max(outputs.data, 1)
