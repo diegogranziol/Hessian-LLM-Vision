@@ -143,7 +143,7 @@ def stateless_model(flatparams, x):
 def flat_fn(p):
     return stateless_model(p, X).reshape(-1)
 
-def GN(p):
+def GN(p,X_batch,y_batch):
     """Gauss-Newton approximation to the Hessian"""
     J = cola.ops.Jacobian(flat_fn, p)
     loss = lambda z: criterion(z.reshape(X.shape[0],-1),y)*n_spirals
@@ -152,7 +152,7 @@ def GN(p):
     return cola.PSD(G+1e-3*cola.ops.I_like(G))
 
 def Fisher(p):
-    F = cola.ops.FIM(lambda p: stateless_model(p, X), p)
+    F = cola.ops.FIM(lambda p: stateless_model(p, X_batch), p)
     return cola.PSD(F+1e-3*cola.ops.I_like(F))
 
 def flat_loss(params):

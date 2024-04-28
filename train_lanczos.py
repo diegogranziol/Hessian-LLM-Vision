@@ -19,6 +19,7 @@ import argparse
 import time
 import gpytorch
 import os
+import gc
 
 parser = argparse.ArgumentParser(description='Example script to demonstrate argparse usage.')
 # Positional argument
@@ -298,7 +299,12 @@ for epoch in range(args.epochs):  # Loop over the dataset multiple times if need
 
         # Update the learning rate
         lr = linear_decay(epoch * len(a_train) + i) * args.lr
-        print(torch.cuda.memory_summary())
+
+        # del V
+        # del gradients
+        # del grad_vector
+        # del adjustment
+        # gc.collect()
 
         # Calculate accuracy
         _, predicted = torch.max(outputs.data, 1)

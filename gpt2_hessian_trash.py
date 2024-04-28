@@ -10,7 +10,6 @@ import gpytorch
 import gc
 import os
 
-
 # Set CUDA_VISIBLE_DEVICES to all available GPUs
 os.environ["CUDA_VISIBLE_DEVICES"] = "0,1,2,3"
 from torch.nn.parallel import DataParallel
@@ -231,8 +230,17 @@ for epoch in range(num_epochs):
 
         # Log the loss
         writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
-        writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
-
+        # print(torch.cuda.memory_summary())
+        # if batch_idx % 100 == 0:
+        #     print(f"{(100*batch_idx)/total_loader_len} complete")
+        #     print(f"Loss: {loss.item()}")
+        # writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
+        del V
+        del gradients
+        del grad_vector
+        del adjustment
+        gc.collect()
+        # print(torch.cuda.memory_summary())
         print(f"Loss: {loss.item()}")
 
 

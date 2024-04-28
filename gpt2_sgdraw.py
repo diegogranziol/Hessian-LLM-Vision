@@ -128,9 +128,11 @@ model.to(torch.device("cuda"))
 num_epochs = 1
 lr = 0.001  # Learning rate
 model.train()
+from time import time
 
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
+        t0 = time()
         input_ids = batch["input_ids"].to("cuda")
 
         # Forward pass
@@ -155,6 +157,7 @@ for epoch in range(num_epochs):
         writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
 
         print(f"Loss: {loss.item()}")
+        print("time taken = {}".format(time()-t0))
 
 # Close the TensorBoard writer
 writer.close()
