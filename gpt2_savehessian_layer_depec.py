@@ -63,40 +63,8 @@ def manual_collate_fn(batch):
 
 dataloader = DataLoader(model_inputs, batch_size=args.batch_size, collate_fn=manual_collate_fn)
 
-save_folder = args.checkpoint.split("/")[:-1]
-save_name = args.checkpoint.split("/")[-1]
-model_state_dict = torch.load(args.checkpoint, map_location=torch.device('cuda'))
-# model.load_state_dict(model_state_dict)
-#
-# Load the configuration from the checkpoint or from the model name
-config = GPT2Config.from_pretrained(model_name, n_positions=512)  # Ensure this matches the training configuration
-
-
-# Create the model with the loaded configuration
+config = GPT2Config(vocab_size=len(tokenizer), n_positions=512)
 model = GPT2LMHeadModel(config)
-num_gpus = torch.cuda.device_count()
-
-# Check if the model state dict needs to be adapted for DataParallel
-if num_gpus > 1:
-    model = torch.nn.DataParallel(model)
-    # Adapt the state dictionary keys for DataParallel
-    new_state_dict = {}
-    for k, v in model_state_dict.items():
-        if not k.startswith('module.'):
-            k = 'module.' + k
-        new_state_dict[k] = v
-    model_state_dict = new_state_dict
-else:
-    # Remove 'module.' prefix if present in the state dict
-    new_state_dict = {}
-    for k, v in model_state_dict.items():
-        if k.startswith('module.'):
-            k = k[len('module.'):]
-        new_state_dict[k] = v
-    model_state_dict = new_state_dict
-
-# Load the state dictionary into the model
-model.load_state_dict(model_state_dict)
 
 
 
@@ -112,64 +80,63 @@ else:
     print("running on a single GPU")
 model.to("cuda")
 
-# save_folder = args.checkpoint.split("/")[:-1]
-# save_name = args.checkpoint.split("/")[-1]
-# model_state_dict = torch.load(args.checkpoint, map_location=torch.device('cuda'))
-# model.load_state_dict(model_state_dict)
+save_folder = args.checkpoint.split("/")[:-1]
+save_name = args.checkpoint.split("/")[-1]
+model_state_dict = torch.load(args.checkpoint, map_location=torch.device('cuda'))
+model.load_state_dict(model_state_dict)
 def _bn_train_mode(m):
     if isinstance(m, torch.nn.BatchNorm2d):
         m.train()
 
-def hess_vec_layer_by_layer(vector, dataloader, model, cuda=True, bn_train_mode=False):
-    param_list = list(model.parameters())
-    vector_list = []
 
-    offset = 0
-    for param in param_list:
-        vector_list.append(vector[offset:offset + param.numel()].detach().view_as(param).to(param.device))
-        offset += param.numel()
-
+def layer_by_layer_hess_vec(dataloader, model, cuda=True, bn_train_mode=False):
+    # Prepare the model
     model.eval()
     if bn_train_mode:
+        # Custom function to set batch normalization layers to train mode
         model.apply(_bn_train_mode)
 
-    model.zero_grad()
-    N = len(dataloader.dataset)
-    for batch_idx, batch in enumerate(dataloader):
-        input_ids = batch["input_ids"].to("cuda")
+    # Initialize a dictionary to store Hessian-vector products for each layer
+    layerwise_hvp = {}
 
-        # Forward pass
-        outputs = model(input_ids=input_ids, labels=input_ids)
-        loss = outputs.loss
-        if num_gpus > 1:
-            loss = loss.mean()
-        loss *= len(batch) / N
+    # Iterate through each parameter layer in the model
+    for name, parameter in model.named_parameters():
+        if parameter.requires_grad:
+            # Initialize a vector of ones with the same shape as the parameter
+            vec = torch.ones_like(parameter)
 
-        hessian_vec_product = torch.zeros_like(vector)
-        offset = 0
+            # Ensure vector is on the same device as the model
+            if cuda:
+                vec = vec.cuda()
 
-        for i, param in enumerate(param_list):
-            # Compute gradient of the loss w.r.t. current layer parameters
-            grad = torch.autograd.grad(loss, param, create_graph=True, retain_graph=True)[0]
+            # Zero gradients in the model
+            model.zero_grad()
 
-            # Get the part of the vector corresponding to the current layer
-            vector_part = vector_list[i]
+            # Compute the loss for the given data loader
+            total_loss = 0
+            for batch_idx, batch in enumerate(dataloader):
+                input_ids = batch["input_ids"].to("cuda" if cuda else "cpu")
 
-            # Compute dot product of gradient and vector_part
-            grad_vector_product = torch.sum(grad * vector_part)
+                # Forward pass
+                outputs = model(input_ids=input_ids, labels=input_ids)
+                loss = outputs.loss
+                if loss.dim() > 0:  # Check if loss is not scalar
+                    loss = loss.mean()
+                total_loss += loss
 
-            # Compute the gradient of the above dot product
-            grad2 = torch.autograd.grad(grad_vector_product, param, retain_graph=True)[0]
+            # Normalize the loss
+            total_loss /= len(dataloader)
 
-            # Store the result in the corresponding part of the hessian_vec_product
-            hessian_vec_product[offset:offset + param.numel()] = grad2.view(-1)
-            offset += param.numel()
+            # Compute gradients with respect to the target parameter
+            grad_loss = grad(total_loss, parameter, create_graph=True)[0]
 
-        # Zero gradients for next batch
-        model.zero_grad()
+            # Compute the Hessian-vector product for the current parameter
+            hvp = grad(grad_loss, parameter, grad_outputs=vec)[0]
 
-    return hessian_vec_product
+            # Store the computed Hessian-vector product
+            layerwise_hvp[name] = hvp.detach()  # Detach to avoid saving in the computation graph
 
+    return layerwise_hvp
 
 
 class CurvVecProduct(object):
@@ -184,7 +151,7 @@ class CurvVecProduct(object):
         if self.iters == 0 and self.init_vec is not None:
             vector = self.init_vec
         start_time = time.time()
-        output = hess_vec_layer_by_layer(
+        output = layer_by_layer_hess_vec(
             vector,
             self.loader,
             self.model,
@@ -230,7 +197,7 @@ result = {
 if args.basis:
     result['V']: V
 print(eigvals)
-relevant_folder = "subsample={}_iters={}_basis={}".format(str(args.subsample),str(args.lanczos_iters),str(args.basis))
+relevant_folder = "subsample={}_iters={}_basis={}_layeronly".format(str(args.subsample),str(args.lanczos_iters),str(args.basis))
 if os.path.exists('{}/{}'.format(save_folder,relevant_folder)):
     pass
 else:

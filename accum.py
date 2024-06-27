@@ -24,6 +24,7 @@ parser.add_argument('--log_dir', type=str, help='Directory for TensorBoard logs'
 parser.add_argument('--checkpoint_dir', type=str, help='Directory for model checkpoints', default='./model_lanczos_checkpoints')
 parser.add_argument('--delta', type=float, help='Delta value for Lanczos adjustments', default=0.001)
 parser.add_argument('--max_length', type=int, help='Max token length for tokenizer', default=32)
+parser.add_argument('--accumulation_steps', type=int, help='Gradient accumulation steps', default=1)
 args = parser.parse_args()
 
 # Set CUDA_VISIBLE_DEVICES to all available GPUs
@@ -67,11 +68,7 @@ def manual_collate_fn(batch):
         'attention_mask': torch.tensor(attention_mask, dtype=torch.long)
     }
 
-def _bn_train_mode(m):
-    if isinstance(m, torch.nn.BatchNorm2d):
-        m.train()
-
-def hess_vec(vector, input_ids, model, device, cuda=True, bn_train_mode=False):
+def hess_vec(vector, input_ids, model, device, cuda=True):
     param_list = list(model.parameters())
     vector_list = []
 
@@ -81,9 +78,6 @@ def hess_vec(vector, input_ids, model, device, cuda=True, bn_train_mode=False):
         offset += param.numel()
 
     model.eval()
-    if bn_train_mode:
-        model.apply(_bn_train_mode)
-
     model.zero_grad()
     outputs = model(input_ids=input_ids, labels=input_ids)
     loss = outputs.loss
@@ -116,8 +110,7 @@ class CurvVecProduct(object):
             self.input_ids,
             self.model,
             self.device,
-            cuda=True,
-            bn_train_mode=True
+            cuda=True
         )
         time_diff = time() - start_time
         self.iters += 1
@@ -148,95 +141,97 @@ for epoch in range(args.num_epochs):
 
         # Forward pass
         outputs = model(input_ids=input_ids, labels=input_ids)
-        loss = outputs.loss
+        loss = outputs.loss / args.accumulation_steps
+        loss.backward()
 
-        gradients = torch.autograd.grad(loss, model.parameters(), create_graph=True)
+        if (batch_idx + 1) % args.accumulation_steps == 0:
+            gradients = [param.grad for param in model.parameters()]
+            gradients = [grad / args.accumulation_steps for grad in gradients]
 
-        P = sum(p.numel() for p in model.parameters())
-        grad_vector = torch.cat([grad.view(-1) for grad in gradients])
+            P = sum(p.numel() for p in model.parameters())
+            grad_vector = torch.cat([grad.view(-1) for grad in gradients])
 
-        adjusted_grad_vector = grad_vector.clone()  # Initialize adjusted gradient vector
+            adjusted_grad_vector = grad_vector.clone()  # Initialize adjusted gradient vector
 
-        productor = CurvVecProduct(input_ids, model, device, init_vec=grad_vector)
+            productor = CurvVecProduct(input_ids, model, device, init_vec=grad_vector)
 
-        random_vec = torch.randn(P, device=device)
-        random_vec = random_vec / torch.norm(random_vec, 2)
+            random_vec = torch.randn(P, device=device)
+            random_vec = random_vec / torch.norm(random_vec, 2)
 
-        lanczos_iters = 10
+            lanczos_iters = 10
 
-        dimension = random_vec.shape[0]
+            dimension = random_vec.shape[0]
 
-        start_start = time()
+            start_start = time()
 
-        T = torch.zeros([lanczos_iters + 1, lanczos_iters + 1], device=device)
-        q_old = torch.zeros_like(random_vec, device=device)  # Ensure q_old is a vector of the same size as random_vec
+            T = torch.zeros([lanczos_iters + 1, lanczos_iters + 1], device=device)
+            q_old = torch.zeros_like(random_vec, device=device)  # Ensure q_old is a vector of the same size as random_vec
 
-        Q = torch.zeros((lanczos_iters + 1, P), device=device)  # Pre-allocate Q
-        v = random_vec.clone()
-        q_old = q_old.to(device)
-        Q[0] = v
-
-        # w = Hess_Vec(M, v)
-        w = hess_vec(v, input_ids, model, device)
-        w = w.to(device)  # Ensure w is on the correct device
-
-        alpha = torch.dot(w, v)
-        T[0, 0] = alpha
-        w -= alpha * v
-        v_old = v
-
-        for i in range(lanczos_iters):
-            start_time = time()
-            b = torch.norm(w, 2)
-            T[i + 1, i] = b
-            T[i, i + 1] = b
-            v = w / b
-            Q[i + 1] = v  # Store the new vector in Q
+            Q = torch.zeros((lanczos_iters + 1, P), device=device)  # Pre-allocate Q
+            v = random_vec.clone()
+            q_old = q_old.to(device)
+            Q[0] = v
 
             # w = Hess_Vec(M, v)
             w = hess_vec(v, input_ids, model, device)
             w = w.to(device)  # Ensure w is on the correct device
 
             alpha = torch.dot(w, v)
-            T[i + 1, i + 1] = alpha
-            w -= (alpha * v + b * v_old)
+            T[0, 0] = alpha
+            w -= alpha * v
             v_old = v
 
-            # print("step", i + 1)
-            # print("Time:", time() - start_time)
+            for i in range(lanczos_iters):
+                start_time = time()
+                b = torch.norm(w, 2)
+                T[i + 1, i] = b
+                T[i, i + 1] = b
+                v = w / b
+                Q[i + 1] = v  # Store the new vector in Q
 
-        eigvals, eigvects = torch.linalg.eigh(T)
-        gammas = eigvects[0, :] ** 2
-        V = eigvects.t() @ Q
-        delta = args.delta
+                # w = Hess_Vec(M, v)
+                w = hess_vec(v, input_ids, model, device)
+                w = w.to(device)  # Ensure w is on the correct device
 
-        # Compute adjustments based on eigenvalues and eigenvectors
-        for i, eigval in enumerate(eigvals):
-            dot_product = torch.dot(grad_vector, V[i])
-            adjustment = (1 / eigval - 1 / (eigval + delta)) * dot_product * V[i]
-            adjusted_grad_vector += adjustment
+                alpha = torch.dot(w, v)
+                T[i + 1, i + 1] = alpha
+                w -= (alpha * v + b * v_old)
+                v_old = v
 
-        split_sizes = [p.numel() for p in model.parameters()]
-        split_gradients = torch.split(adjusted_grad_vector, split_sizes)
+                # print("step", i + 1)
+                # print("Time:", time() - start_time)
 
-        adjusted_gradients = [g.view(p.size()) for g, p in zip(split_gradients, model.parameters())]
+            eigvals, eigvects = torch.linalg.eigh(T)
+            gammas = eigvects[0, :] ** 2
+            V = eigvects.t() @ Q
+            delta = args.delta
 
-        # Perform the manual SGD update with momentum, using adjusted gradients
-        with torch.no_grad():
-            for param, adj_grad in zip(model.parameters(), adjusted_gradients):
-                weight_decay_term = 0.0005 * param.data if 0.0005 != 0 else 0
-                adjusted_grad_with_weight_decay = adj_grad + weight_decay_term
+            # Compute adjustments based on eigenvalues and eigenvectors
+            for i, eigval in enumerate(eigvals):
+                dot_product = torch.dot(grad_vector, V[i])
+                adjustment = (1 / eigval - 1 / (eigval + delta)) * dot_product * V[i]
+                adjusted_grad_vector += adjustment
 
-                if param in momentum_buffers:
-                    momentum_buffers[param] = momentum_buffers[param] * args.momentum + adjusted_grad_with_weight_decay
-                else:
-                    momentum_buffers[param] = adjusted_grad_with_weight_decay
+            split_sizes = [p.numel() for p in model.parameters()]
+            split_gradients = torch.split(adjusted_grad_vector, split_sizes)
 
-                param.data -= args.lr * momentum_buffers[param]
+            adjusted_gradients = [g.view(p.size()) for g, p in zip(split_gradients, model.parameters())]
 
-        writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
+            # Perform the manual SGD update with momentum, using adjusted gradients
+            with torch.no_grad():
+                for param, adj_grad in zip(model.parameters(), adjusted_gradients):
+                    if param in momentum_buffers:
+                        momentum_buffers[param] = momentum_buffers[param] * args.momentum + adj_grad
+                    else:
+                        momentum_buffers[param] = adj_grad
 
-        print(f"Loss: {loss.item()}")
+                    param.data -= args.lr * momentum_buffers[param]
+
+            model.zero_grad()  # Reset gradients after update
+
+        writer.add_scalar('Loss/train', loss.item() * args.accumulation_steps, epoch * len(dataloader) + batch_idx)
+
+        print(f"Loss: {loss.item() * args.accumulation_steps}")
 
 writer.close()
 torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_trained.pt"))

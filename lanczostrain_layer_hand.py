@@ -7,9 +7,8 @@ from torch.optim import SGD, Adam
 import torch
 from torch.utils.tensorboard import SummaryWriter
 from time import time
-import gpytorch
-import gc
 import os
+import gc
 
 # Argument parser setup
 parser = argparse.ArgumentParser(description='Script for training GPT-2 with custom arguments.')
@@ -89,7 +88,6 @@ def hess_vec(vector, input_ids, model, layer_idx, device, cuda=True, bn_train_mo
     dL_dvec = torch.sum(vector * grad)
     dL_dvec.backward()
 
-    model.eval()
     return param.grad.view(-1)
 
 
@@ -99,6 +97,10 @@ config = GPT2Config(vocab_size=len(tokenizer), n_positions=args.max_length)
 model = GPT2LMHeadModel(config)
 model.to(torch.device("cuda"))
 model = DataParallel(model)
+
+# Ensure all model parameters require gradients
+for param in model.parameters():
+    param.requires_grad = True
 
 # Initialize TensorBoard SummaryWriter
 os.makedirs(args.log_dir, exist_ok=True)
