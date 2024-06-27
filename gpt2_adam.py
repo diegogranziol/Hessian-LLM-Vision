@@ -14,7 +14,9 @@ parser.add_argument('--batch_size', type=int, help='A list of numbers', default=
 parser.add_argument('--subsample', type=float, help='A list of numbers', default=1)
 parser.add_argument('--lr', type=float, help='A list of numbers', default=1)
 parser.add_argument('--momentum', type=float, help='A list of numbers', default=0.9)
-parser.add_argument('--optimiser', type=str, help='A list of numbers', default='sgd')
+parser.add_argument('--beta2', type=float, help='A list of numbers', default=0.999)
+parser.add_argument('--delta', type=float, help='A list of numbers', default=1e-8)
+parser.add_argument('--accumulation_steps', type=int, help='A list of numbers', default=2)
 args = parser.parse_args()
 
 # Import necessary for Data Parallel
@@ -73,15 +75,8 @@ if torch.cuda.device_count() >= 1:
     model = DataParallel(model, device_ids=list(range(torch.cuda.device_count())))
 model.to("cuda")
 
-optimiser = args.optimiser.lower()
-print("optimiser chosen = {}".format(optimiser))
-if optimiser == 'sgd':
-    optimizer = SGD(model.parameters(), lr=args.lr, momentum=args.momentum)
-elif optimiser == 'adam':
-    optimizer = Adam(model.parameters(), lr=args.lr, betas=(args.momentum, 0.999), eps=1e-8)
-else:
-    print("failed optimiser")
-
+optimizer = Adam(model.parameters(), lr=args.lr, betas=(args.momentum, args.beta2), eps=args.delta)
+optimiser = "adam"
 
 # Specify the directory to save TensorBoard logs and model checkpoints
 log_dir = "training/{}/{}/gpu={}_lr={}_batchsize={}/tensorboard_logs".format(
@@ -94,11 +89,13 @@ os.makedirs(log_dir, exist_ok=True)
 os.makedirs(checkpoint_dir, exist_ok=True)
 writer = SummaryWriter(log_dir)
 
-torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_untrained.pt"))
+#torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_untrained.pt"))
 
 num_epochs = 1
 model.train()
 total_loader_len = len(dataloader)
+
+gradient_accumulation_steps = args.accumulation_steps  # Set the number of gradient accumulation steps
 
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
@@ -107,11 +104,19 @@ for epoch in range(num_epochs):
         optimizer.zero_grad()
         outputs = model(input_ids=input_ids, attention_mask=attention_mask, labels=input_ids)
         loss = outputs.loss.mean()
-        loss.backward()
-        optimizer.step()
+
+        # Gradient accumulation
+        if (batch_idx + 1) % gradient_accumulation_steps == 0:
+            loss = loss / gradient_accumulation_steps
+            loss.backward()
+            optimizer.step()
+            optimizer.zero_grad()
+
         writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
         if batch_idx % 100 == 0:
             print(f"{(100*batch_idx)/total_loader_len} complete")
-            print(f"Loss: {loss.item()}")
+            print(f"{loss.item()}")
+
+
 
 torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_trained.pt"))

@@ -122,7 +122,7 @@ class CurvVecProduct(object):
         )
         time_diff = time.time() - start_time
         self.iters += 1
-        print('Iter %d. Time: %.2f' % (self.iters, time_diff))
+        # print('Iter %d. Time: %.2f' % (self.iters, time_diff))
         # return output.cpu().unsqueeze(1)
         return output.unsqueeze(1)
 
@@ -137,10 +137,10 @@ model = DataParallel(model)
 
 
 num_epochs = 1
-lr = 0.0001
+lr = 0.001
 momentum = 0.9
-weight_decay = 0.0005
-delta = 0.001
+weight_decay = 0
+delta = 1
 
 log_dir = "./tensorboard_lanczos_logs"
 checkpoint_dir = "./model_lanczos_checkpoints"
@@ -157,6 +157,7 @@ total_loader_len = len(dataloader)
 
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
+        start_time = time.time()
         input_ids = batch["input_ids"].to("cuda")
 
         # Forward pass
@@ -229,12 +230,16 @@ for epoch in range(num_epochs):
                 # Update the parameter
                 param.data -= lr * momentum_buffers[param]
 
+        end_time = time.time()  # End time measurement
+        elapsed_time = end_time - start_time
+
         # Log the loss
         writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
         writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
 
-        print(f"Loss: {loss.item()}")
-
+        if batch_idx % 10 == 0:
+            print(f"{(10 * batch_idx) / total_loader_len} complete")
+            print(f"Loss: {loss.item()}")
 
 # Close the TensorBoard writer
 writer.close()

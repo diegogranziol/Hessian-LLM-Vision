@@ -4,21 +4,21 @@ import json
 
 def objective(trial):
     # Define the hyperparameters to tune
-    k = trial.suggest_int('k', 1, 10)
+    beta2 = trial.suggest_loguniform('beta2', 0.9, 0.9999)
     lr = trial.suggest_loguniform('lr', 1e-6, 1e-3)
-    delta = trial.suggest_loguniform('delta', 1e-6, 1.0)
+    delta = trial.suggest_loguniform('delta', 1e-9, 1)
 
     # Fixed hyperparameters
-    batch_size = 8
-    accumulation_steps = 8
+    batch_size = 32
+    accumulation_steps = 2
     subsample = 0.01
 
     # Construct the command to run the script
     command = [
-        'python', 'gpt2_hessian_gpu.py',
+        'python', 'gpt2_adam.py',
         '--batch_size', str(batch_size),
         '--accumulation_steps', str(accumulation_steps),
-        '--k', str(k),
+        '--beta2', str(beta2),
         '--subsample', str(subsample),
         '--lr', str(lr),
         '--delta', str(delta)
@@ -53,5 +53,5 @@ if __name__ == '__main__':
     print('Best trial:', study.best_trial.params)
 
     # Save the study results
-    with open('best_params.json', 'w') as f:
+    with open('best_params_adam.json', 'w') as f:
         json.dump(study.best_trial.params, f, indent=4)

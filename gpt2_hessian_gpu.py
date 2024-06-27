@@ -22,6 +22,7 @@ parser.add_argument('--lr', type=float, help='A list of numbers', default=1)
 parser.add_argument('--momentum', type=float, help='A list of numbers', default=0.9)
 parser.add_argument('--lanczos_momentum', type=float, help='A list of numbers', default=0)
 parser.add_argument('--delta', type=float, help='A list of numbers', default=1)
+parser.add_argument('--accumulation_steps', type=int, help='A list of numbers', default=4)
 args = parser.parse_args()
 
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -133,7 +134,7 @@ class CurvVecProduct(object):
         time_diff = time.time() - start_time
         self.iters += 1
         # print('Iter %d. Time: %.2f' % (self.iters, time_diff))
-        return output.cpu().unsqueeze(1)
+        return output.unsqueeze(1)
         # return output.unsqueeze(1)
 
 dataloader = DataLoader(model_inputs, batch_size=args.batch_size, collate_fn=manual_collate_fn)
@@ -156,10 +157,10 @@ weight_decay = 0
 delta = args.delta
 
 # Define directory paths
-log_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}/tensorboard_logs".format(
-    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k)
-checkpoint_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}/model_checkpoints".format(
-    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k)
+log_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}_accum={}/tensorboard_logs".format(
+    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k, args.accumulation_steps)
+checkpoint_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}_accum={}/model_checkpoints".format(
+    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k, args.accumulation_steps)
 
 # Output directories for verification
 print("TensorBoard logs will be saved in:", log_dir)
@@ -177,6 +178,7 @@ for param in model.parameters():
 model.train()
 total_loader_len = len(dataloader)
 
+accumulation_steps = args.accumulation_steps
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
         start_time = time.time()
@@ -188,81 +190,65 @@ for epoch in range(num_epochs):
         if loss.dim() > 0:  # Check if loss is not scalar
             loss = loss.mean()
 
+        # Normalize the loss to account for the gradient accumulation
+        loss = loss / accumulation_steps
+
         gradients = torch.autograd.grad(loss, model.parameters(), create_graph=True)
 
         P = sum(p.numel() for p in model.parameters())
         grad_vector = torch.cat([grad.view(-1) for grad in gradients])
-        # grad_vector.cuda()
-        # grad_vector = grad_vector.cuda()
-        """kill this extra memory cost"""
 
         adjusted_grad_vector = grad_vector.clone()  # Initialize adjusted gradient vector
 
-        # grad_vector = grad_vector / torch.norm(grad_vector)
-
         if batch_idx % args.k == 0:
-
-            # Pass the random vector as the initial vector to the CurvVecProduct
             productor = CurvVecProduct(input_ids, model, init_vec=grad_vector)
-
-            # Run the Lanczos algorithm
             lanczos_iters = 10
             Q, T = gpytorch.utils.lanczos.lanczos_tridiag(
                 productor,
                 max_iter=lanczos_iters,
                 dtype=torch.float32,
-                device='cpu',
+                device='cuda',
                 matrix_shape=(P, P)
             )
 
             eigvals, eigvects = torch.linalg.eigh(T)
             gammas = eigvects[0, :] ** 2
             V = eigvects.t() @ Q.t()
-        #delta = args.lanczos_beta
             if args.lanczos_momentum > 0 and batch_idx > args.k:
-                V = args.lanczos_momentum*V_old+(1-args.lanczos_momentum)*V
-                eigvals = args.lanczos_momentum*eigvals_old+(1-args.lanczos_momentum)*eigvals
+                V = args.lanczos_momentum * V_old + (1 - args.lanczos_momentum) * V
+                eigvals = args.lanczos_momentum * eigvals_old + (1 - args.lanczos_momentum) * eigvals
             V_old = V
             eigvals_old = eigvals
 
-
-
-        # Compute adjustments based on eigenvalues and eigenvectors
         grad_vector = grad_vector.to("cuda")
         for i, eigval in enumerate(eigvals):
             intermediate_vec = V[i].to("cuda")
             dot_product = torch.dot(grad_vector, intermediate_vec)
             adjustment = (1 / eigval - 1 / (eigval + delta)) * dot_product * intermediate_vec
             adjusted_grad_vector += adjustment
-        # Convert the split tensors to the correct shape
-        # adjusted_gradients = [g.view(p.size()) for g, p in zip(adjusted_grad_vector, model.parameters())]
 
-        # Calculate the correct splits for 'adjusted_grad_vector' based on model parameters
         split_sizes = [p.numel() for p in model.parameters()]
-        # Split 'adjusted_grad_vector' accordingly
         split_gradients = torch.split(adjusted_grad_vector, split_sizes)
-
-        # Now, correctly reshape each split gradient to match the corresponding parameter's shape
         adjusted_gradients = [g.view(p.size()) for g, p in zip(split_gradients, model.parameters())]
 
-        # print('adjust gradient vector {}'.format(adjusted_grad_vector.shape))
-        # print('gradient {}'.format(grad_vector.shape))
-
-        # Perform the manual SGD update with momentum, using adjusted gradients
         with torch.no_grad():
             for param, adj_grad in zip(model.parameters(), adjusted_gradients):
-                # Compute the 'flattened' version of the weight decay term + adjusted gradient
                 weight_decay_term = weight_decay * param.data if weight_decay != 0 else 0
                 adjusted_grad_with_weight_decay = adj_grad + weight_decay_term
 
-                # Update the momentum buffer with the adjusted gradient
                 if param in momentum_buffers:
-                    momentum_buffers[param] = momentum_buffers[param] * momentum + adjusted_grad_with_weight_decay
+                    momentum_buffers[param] = momentum_buffers[param] * momentum + adjusted_grad_with_weight_decay / accumulation_steps
                 else:
-                    momentum_buffers[param] = adjusted_grad_with_weight_decay
+                    momentum_buffers[param] = adjusted_grad_with_weight_decay / accumulation_steps
 
-                # Update the parameter
-                param.data -= lr * momentum_buffers[param]
+                # Accumulate gradients
+                param.grad = momentum_buffers[param] if param.grad is None else param.grad + momentum_buffers[param]
+
+        if (batch_idx + 1) % accumulation_steps == 0:
+            with torch.no_grad():
+                for param in model.parameters():
+                    param.data -= lr * param.grad  # Apply the accumulated gradients
+                    param.grad = None  # Clear the gradients
 
         end_time = time.time()  # End time measurement
         elapsed_time = end_time - start_time
@@ -270,21 +256,10 @@ for epoch in range(num_epochs):
         # Log the loss
         writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
         writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
-        # print(torch.cuda.memory_summary())
-        # if batch_idx % 100 == 0:
-        #     print(f"{(100*batch_idx)/total_loader_len} complete")
-        #     print(f"Loss: {loss.item()}")
-        # writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
-        # del V
-        # del gradients
-        # del grad_vector
-        # del adjustment
-        # gc.collect()
-        # print(torch.cuda.memory_summary())
-        if batch_idx % 10 == 0:
-            print(f"{(10*batch_idx)/total_loader_len} complete")
-            print(f"Loss: {loss.item()}")
 
+        if batch_idx % 10 == 0:
+            print(f"{(10 * batch_idx) / total_loader_len} complete")
+            print(f"Loss: {loss.item()}")
 
 # Close the TensorBoard writer
 writer.close()
