@@ -4,14 +4,15 @@ import json
 
 def objective(trial):
     # Define the hyperparameters to tune
-    k = trial.suggest_int('k', 1, 10)
-    lr = trial.suggest_loguniform('lr', 1e-6, 1e-3)
-    delta = trial.suggest_loguniform('delta', 1e-6, 1.0)
+    k = trial.suggest_int('k', 5, 50)
+    lr = float(f"{trial.suggest_loguniform('lr', 1e-4, 1e-3):.2g}")
+    delta = float(f"{trial.suggest_loguniform('delta', 1e-6, 1e-4):.2g}")
+    lanczos_momentum = float(f"{trial.suggest_uniform('lanczos_momentum', 0, 1):.2g}")
 
     # Fixed hyperparameters
     batch_size = 8
     accumulation_steps = 8
-    subsample = 0.01
+    subsample = 0.25
 
     # Construct the command to run the script
     command = [
@@ -21,7 +22,8 @@ def objective(trial):
         '--k', str(k),
         '--subsample', str(subsample),
         '--lr', str(lr),
-        '--delta', str(delta)
+        '--delta', str(delta),
+        '--lanczos_momentum', str(lanczos_momentum)
     ]
 
     # Run the command and capture the output

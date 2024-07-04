@@ -79,27 +79,38 @@ config = GPT2Config.from_pretrained(model_name, n_positions=512)  # Ensure this 
 model = GPT2LMHeadModel(config)
 num_gpus = torch.cuda.device_count()
 
-# Check if the model state dict needs to be adapted for DataParallel
-if num_gpus > 1:
-    model = torch.nn.DataParallel(model)
-    # Adapt the state dictionary keys for DataParallel
-    new_state_dict = {}
-    for k, v in model_state_dict.items():
-        if not k.startswith('module.'):
-            k = 'module.' + k
-        new_state_dict[k] = v
-    model_state_dict = new_state_dict
-else:
-    # Remove 'module.' prefix if present in the state dict
-    new_state_dict = {}
-    for k, v in model_state_dict.items():
-        if k.startswith('module.'):
-            k = k[len('module.'):]
-        new_state_dict[k] = v
-    model_state_dict = new_state_dict
+# Adapt the state dictionary keys if necessary
+new_state_dict = {}
+for k, v in model_state_dict.items():
+    if k.startswith('module.'):
+        k = k[len('module.'):]
+    new_state_dict[k] = v
+model_state_dict = new_state_dict
 
 # Load the state dictionary into the model
 model.load_state_dict(model_state_dict)
+
+# # Check if the model state dict needs to be adapted for DataParallel
+# if num_gpus > 1:
+#     model = torch.nn.DataParallel(model)
+#     # Adapt the state dictionary keys for DataParallel
+#     new_state_dict = {}
+#     for k, v in model_state_dict.items():
+#         if not k.startswith('module.'):
+#             k = 'module.' + k
+#         new_state_dict[k] = v
+#     model_state_dict = new_state_dict
+# else:
+#     # Remove 'module.' prefix if present in the state dict
+#     new_state_dict = {}
+#     for k, v in model_state_dict.items():
+#         if k.startswith('module.'):
+#             k = k[len('module.'):]
+#         new_state_dict[k] = v
+#     model_state_dict = new_state_dict
+
+# Load the state dictionary into the model
+
 
 
 num_gpus = torch.cuda.device_count()
@@ -175,7 +186,7 @@ class CurvVecProduct(object):
         time_diff = time.time() - start_time
         self.iters += 1
         print('Iter %d. Time: %.2f' % (self.iters, time_diff))
-        return output.cpu().unsqueeze(1)
+        return output.unsqueeze(1)
 
 print('running Lanczos on original training set model')
 
@@ -192,7 +203,7 @@ Q, T = gpytorch.utils.lanczos.lanczos_tridiag(
     productor,
     max_iter=lanczos_iters,
     dtype=torch.float32,
-    device='cpu',
+    device='cuda',
     matrix_shape=(P, P)
 )
 
@@ -211,6 +222,8 @@ result = {
 if args.basis:
     result['V']: V
 print(eigvals)
+save_folder = "/".join(save_folder)
+print(f"save {save_folder}")
 relevant_folder = "subsample={}_iters={}_basis={}".format(str(args.subsample),str(args.lanczos_iters),str(args.basis))
 if os.path.exists('{}/{}'.format(save_folder,relevant_folder)):
     pass
@@ -218,4 +231,6 @@ else:
     os.makedirs('{}/{}'.format(save_folder,relevant_folder))
 
 # Save the result dictionary
+
 torch.save(result, '{}/{}/{}.ckpt'.format(save_folder,relevant_folder,save_name))
+print('{}/{}/{}.ckpt'.format(save_folder,relevant_folder,save_name))

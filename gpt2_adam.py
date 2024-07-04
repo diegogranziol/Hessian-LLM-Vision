@@ -8,15 +8,16 @@ import torch
 from torch.utils.tensorboard import SummaryWriter
 import os
 import argparse
+import time
 parser = argparse.ArgumentParser(description='Example script to demonstrate argparse usage.')
 # parser.add_argument('--gpus', type=int,  help='A list of numbers', default=1)
-parser.add_argument('--batch_size', type=int, help='A list of numbers', default=128)
+parser.add_argument('--batch_size', type=int, help='A list of numbers', default=8)
 parser.add_argument('--subsample', type=float, help='A list of numbers', default=1)
 parser.add_argument('--lr', type=float, help='A list of numbers', default=1)
 parser.add_argument('--momentum', type=float, help='A list of numbers', default=0.9)
 parser.add_argument('--beta2', type=float, help='A list of numbers', default=0.999)
 parser.add_argument('--delta', type=float, help='A list of numbers', default=1e-8)
-parser.add_argument('--accumulation_steps', type=int, help='A list of numbers', default=2)
+parser.add_argument('--accumulation_steps', type=int, help='A list of numbers', default=8)
 args = parser.parse_args()
 
 # Import necessary for Data Parallel
@@ -78,12 +79,13 @@ model.to("cuda")
 optimizer = Adam(model.parameters(), lr=args.lr, betas=(args.momentum, args.beta2), eps=args.delta)
 optimiser = "adam"
 
-# Specify the directory to save TensorBoard logs and model checkpoints
-log_dir = "training/{}/{}/gpu={}_lr={}_batchsize={}/tensorboard_logs".format(
-    optimiser, args.subsample, torch.cuda.device_count(), args.lr, args.batch_size)
+# Including the new parameters in the directory paths
+log_dir = "training/{}/{}/gpu={}_lr={}_batchsize={}_beta2={}_delta={}/tensorboard_logs".format(
+    optimiser, args.subsample, torch.cuda.device_count(), args.lr, args.batch_size, args.beta2, args.delta)
 
-checkpoint_dir = "training/{}/{}/gpu={}_lr={}_batchsize={}/model_checkpoints".format(
-    optimiser, args.subsample, torch.cuda.device_count(), args.lr, args.batch_size)
+checkpoint_dir = "training/{}/{}/gpu={}_lr={}_batchsize={}_beta2={}_delta={}/model_checkpoints".format(
+    optimiser, args.subsample, torch.cuda.device_count(), args.lr, args.batch_size, args.beta2, args.delta)
+
 
 os.makedirs(log_dir, exist_ok=True)
 os.makedirs(checkpoint_dir, exist_ok=True)
@@ -96,9 +98,11 @@ model.train()
 total_loader_len = len(dataloader)
 
 gradient_accumulation_steps = args.accumulation_steps  # Set the number of gradient accumulation steps
+ema_loss = None  # Initialize EMA of the loss
 
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
+        start_time = time.time()
         input_ids = batch["input_ids"].to("cuda")
         attention_mask = batch["attention_mask"].to("cuda")
         optimizer.zero_grad()
@@ -112,10 +116,20 @@ for epoch in range(num_epochs):
             optimizer.step()
             optimizer.zero_grad()
 
-        writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
-        if batch_idx % 100 == 0:
-            print(f"{(100*batch_idx)/total_loader_len} complete")
-            print(f"{loss.item()}")
+        end_time = time.time()  # End time measurement
+        elapsed_time = end_time - start_time
+
+        if ema_loss is None:
+            ema_loss = loss.item()  # Initialize EMA with the first loss value
+        else:
+            ema_loss = 0.99 * ema_loss + 0.01 * loss.item()  # Update EMA
+
+        writer.add_scalar('Loss/train', ema_loss, epoch * len(dataloader) + batch_idx)
+        writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
+
+        if batch_idx % 10 == 0:
+            print(f"{(10 * batch_idx) / total_loader_len} complete")
+            print(f"{ema_loss}")
 
 
 

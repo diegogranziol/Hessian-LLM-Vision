@@ -157,10 +157,10 @@ weight_decay = 0
 delta = args.delta
 
 # Define directory paths
-log_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}_accum={}/tensorboard_logs".format(
-    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k, args.accumulation_steps)
-checkpoint_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}_accum={}/model_checkpoints".format(
-    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k, args.accumulation_steps)
+log_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}_accum={}_lanczosmomentum={}/tensorboard_logs".format(
+    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k, args.accumulation_steps, args.lanczos_momentum)
+checkpoint_dir = "training/{}/{}/gpu={}_lr={}_delta={}_batchsize={}_k={}_accum={}_lanczosmomentum={}/model_checkpoints".format(
+    optimiser, args.subsample, torch.cuda.device_count(), lr, args.delta, args.batch_size, args.k, args.accumulation_steps, args.lanczos_momentum)
 
 # Output directories for verification
 print("TensorBoard logs will be saved in:", log_dir)
@@ -179,6 +179,8 @@ model.train()
 total_loader_len = len(dataloader)
 
 accumulation_steps = args.accumulation_steps
+ema_loss = None  # Initialize EMA of the loss
+
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
         start_time = time.time()
@@ -253,13 +255,19 @@ for epoch in range(num_epochs):
         end_time = time.time()  # End time measurement
         elapsed_time = end_time - start_time
 
-        # Log the loss
-        writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
+        # Update and log the EMA of the loss
+        if ema_loss is None:
+            ema_loss = loss.item()  # Initialize EMA with the first loss value
+        else:
+            ema_loss = 0.99 * ema_loss + 0.01 * loss.item()  # Update EMA
+
+        writer.add_scalar('Loss/train', ema_loss, epoch * len(dataloader) + batch_idx)
         writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
 
         if batch_idx % 10 == 0:
             print(f"{(10 * batch_idx) / total_loader_len} complete")
-            print(f"Loss: {loss.item()}")
+            print(f"{ema_loss}")
+
 
 # Close the TensorBoard writer
 writer.close()

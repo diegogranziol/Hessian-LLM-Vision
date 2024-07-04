@@ -68,7 +68,6 @@ save_name = args.checkpoint.split("/")[-1]
 model_state_dict = torch.load(args.checkpoint, map_location=torch.device('cuda'))
 # model.load_state_dict(model_state_dict)
 #
-# Load the configuration from the checkpoint or from the model name
 config = GPT2Config.from_pretrained(model_name, n_positions=512)  # Ensure this matches the training configuration
 
 
@@ -76,30 +75,38 @@ config = GPT2Config.from_pretrained(model_name, n_positions=512)  # Ensure this 
 model = GPT2LMHeadModel(config)
 num_gpus = torch.cuda.device_count()
 
-# Check if the model state dict needs to be adapted for DataParallel
-if num_gpus > 1:
-    model = torch.nn.DataParallel(model)
-    # Adapt the state dictionary keys for DataParallel
-    new_state_dict = {}
-    for k, v in model_state_dict.items():
-        if not k.startswith('module.'):
-            k = 'module.' + k
-        new_state_dict[k] = v
-    model_state_dict = new_state_dict
-else:
-    # Remove 'module.' prefix if present in the state dict
-    new_state_dict = {}
-    for k, v in model_state_dict.items():
-        if k.startswith('module.'):
-            k = k[len('module.'):]
-        new_state_dict[k] = v
-    model_state_dict = new_state_dict
+# Adapt the state dictionary keys if necessary
+new_state_dict = {}
+for k, v in model_state_dict.items():
+    if k.startswith('module.'):
+        k = k[len('module.'):]
+    new_state_dict[k] = v
+model_state_dict = new_state_dict
 
 # Load the state dictionary into the model
 model.load_state_dict(model_state_dict)
 
 
+# # Check if the model state dict needs to be adapted for DataParallel
+# if num_gpus > 1:
+#     model = torch.nn.DataParallel(model)
+#     # Adapt the state dictionary keys for DataParallel
+#     new_state_dict = {}
+#     for k, v in model_state_dict.items():
+#         if not k.startswith('module.'):
+#             k = 'module.' + k
+#         new_state_dict[k] = v
+#     model_state_dict = new_state_dict
+# else:
+#     # Remove 'module.' prefix if present in the state dict
+#     new_state_dict = {}
+#     for k, v in model_state_dict.items():
+#         if k.startswith('module.'):
+#             k = k[len('module.'):]
+#         new_state_dict[k] = v
+#     model_state_dict = new_state_dict
 
+# Load the state dictionary into the model
 
 
 
