@@ -15,14 +15,14 @@ import argparse
 from torch.nn.parallel import DataParallel
 
 parser = argparse.ArgumentParser(description='Example script to demonstrate argparse usage.')
-parser.add_argument('--batch_size', type=int, help='A list of numbers', default=128)
-parser.add_argument('--k', type=int, help='A list of numbers', default=5)
+parser.add_argument('--batch_size', type=int, help='A list of numbers', default=8)
+parser.add_argument('--k', type=int, help='A list of numbers', default=50)
 parser.add_argument('--subsample', type=float, help='A list of numbers', default=1)
-parser.add_argument('--lr', type=float, help='A list of numbers', default=1)
+parser.add_argument('--lr', type=float, help='A list of numbers', default=1e-3)
 parser.add_argument('--momentum', type=float, help='A list of numbers', default=0.9)
-parser.add_argument('--lanczos_momentum', type=float, help='A list of numbers', default=0)
-parser.add_argument('--delta', type=float, help='A list of numbers', default=1)
-parser.add_argument('--accumulation_steps', type=int, help='A list of numbers', default=4)
+parser.add_argument('--lanczos_momentum', type=float, help='A list of numbers', default=0.9)
+parser.add_argument('--delta', type=float, help='A list of numbers', default=1e-4)
+parser.add_argument('--accumulation_steps', type=int, help='A list of numbers', default=8)
 args = parser.parse_args()
 
 #device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
@@ -180,10 +180,19 @@ total_loader_len = len(dataloader)
 
 accumulation_steps = args.accumulation_steps
 ema_loss = None  # Initialize EMA of the loss
+started = False
+
+import pickle
+
+time_list = []
+loss_list = []
+ema_loss_list = []
 
 for epoch in range(num_epochs):
     for batch_idx, batch in enumerate(dataloader):
-        start_time = time.time()
+        if not started:
+            start_time = time.time()
+            started = True
         input_ids = batch["input_ids"].to("cuda")
 
         # Forward pass
@@ -197,12 +206,13 @@ for epoch in range(num_epochs):
 
         gradients = torch.autograd.grad(loss, model.parameters(), create_graph=True)
 
-        P = sum(p.numel() for p in model.parameters())
-        grad_vector = torch.cat([grad.view(-1) for grad in gradients])
-
-        adjusted_grad_vector = grad_vector.clone()  # Initialize adjusted gradient vector
-
         if batch_idx % args.k == 0:
+
+            P = sum(p.numel() for p in model.parameters())
+            grad_vector = torch.cat([grad.view(-1) for grad in gradients])
+
+            adjusted_grad_vector = grad_vector.clone()  # Initialize adjusted gradient vector
+
             productor = CurvVecProduct(input_ids, model, init_vec=grad_vector)
             lanczos_iters = 10
             Q, T = gpytorch.utils.lanczos.lanczos_tridiag(
@@ -252,23 +262,34 @@ for epoch in range(num_epochs):
                     param.data -= lr * param.grad  # Apply the accumulated gradients
                     param.grad = None  # Clear the gradients
 
-        end_time = time.time()  # End time measurement
-        elapsed_time = end_time - start_time
+            end_time = time.time()  # End time measurement
+            elapsed_time = end_time - start_time
 
-        # Update and log the EMA of the loss
-        if ema_loss is None:
-            ema_loss = loss.item()  # Initialize EMA with the first loss value
-        else:
-            ema_loss = 0.99 * ema_loss + 0.01 * loss.item()  # Update EMA
+            # Update and log the EMA of the loss
+            if ema_loss is None:
+                ema_loss = loss.item()  # Initialize EMA with the first loss value
+            else:
+                ema_loss = 0.99 * ema_loss + 0.01 * loss.item()  # Update EMA
 
-        writer.add_scalar('Loss/train', ema_loss, epoch * len(dataloader) + batch_idx)
-        writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
+            writer.add_scalar('Time/train', elapsed_time, epoch * len(dataloader) + batch_idx)
+            writer.add_scalar('Ema_loss/train', ema_loss, epoch * len(dataloader) + batch_idx)
+            writer.add_scalar('Loss/train', loss.item(), epoch * len(dataloader) + batch_idx)
 
-        if batch_idx % 10 == 0:
-            print(f"{(10 * batch_idx) / total_loader_len} complete")
-            print(f"{ema_loss}")
+            started = False
 
+            time_list.append(elapsed_time)
+            loss_list.append(loss.item())
+            ema_loss_list.append(ema_loss)
+
+            if batch_idx % 10 == 0:
+                print(f"{(10 * batch_idx) / total_loader_len} complete")
+                print(f"{ema_loss}")
+                with open(os.path.join(checkpoint_dir, 'training_stats.pkl'), 'ab') as f:
+                    pickle.dump({'time': time_list, 'loss': loss_list, 'ema_loss': ema_loss_list}, f)
 
 # Close the TensorBoard writer
 writer.close()
 torch.save(model.state_dict(), os.path.join(checkpoint_dir, f"model_trained.pt"))
+if time_list or loss_list or ema_loss_list:
+    with open(os.path.join(checkpoint_dir, 'training_stats.pkl'), 'ab') as f:
+        pickle.dump({'time': time_list, 'loss': loss_list, 'ema_loss': ema_loss_list}, f)
